@@ -8,6 +8,9 @@ import os
 from pathlib import Path
 
 
+WIKIPEDIA_DATA_PATH = "/data/oss_bucket_0/modelscope/models/wikipedia/data/20220301.en"
+
+
 class SecondMoment:
     """计算二阶矩统计量（协方差矩阵）"""
     
@@ -54,18 +57,7 @@ class NullSpaceProjector:
                                    n_samples: int = 10000,
                                    batch_size: int = 1,
                                    max_seq_length: int = 512):
-        """
-        Compute the covariance matrix for a specific layer from data.
-
-        Args:
-            model: The model containing the layer.
-            tokenizer: Tokenizer for processing input data.
-            layer_name: Name of the layer to compute covariance for.
-            dataset_name: Dataset to use for computation (default: Wikipedia).
-            n_samples: Number of samples to process.
-            batch_size: Batch size for processing.
-            max_seq_length: Maximum sequence length for tokenization.
-        """
+        """从数据计算指定层的协方差矩阵"""
         
         print(f"Computing covariance matrix for layer: {layer_name}")
         
@@ -83,7 +75,7 @@ class NullSpaceProjector:
         out_features, in_features = weight_shape
         print(f"Target layer weight shape: {weight_shape}")
         
-        raw_ds = load_dataset("/nas/user/zhaoxin/chiyin/modelscope/swift___wikipedia/20220301.en/2.0.0",split="train")
+        raw_ds = load_dataset(WIKIPEDIA_DATA_PATH, split="train")
         # 初始化统计量
         stat = SecondMoment()
         
@@ -142,7 +134,8 @@ class NullSpaceProjector:
                         
                         # 检查输出形状并进行适当的处理
                         original_shape = output_feats.shape
-                        print(f"Debug: Layer {layer_name} output shape: {original_shape}, expected out_features: {out_features}")
+                        if processed_samples == 0:
+                            print(f"Debug: Layer {layer_name} output shape: {original_shape}, expected out_features: {out_features}")
                         
                         # 处理不同维度的输出
                         if output_feats.dim() == 4:  # [batch, heads, seq_len, seq_len] for attention bias
@@ -151,17 +144,10 @@ class NullSpaceProjector:
                         elif output_feats.dim() == 3:  # [batch, seq_len, out_features]
                             # 使用attention_mask来过滤padding
                             if "attention_mask" in inputs:
-                                mask = inputs["attention_mask"].bool().unsqueeze(-1)
-                                if mask.shape[-1] == 1 and output_feats.shape[-1] != 1:
-                                    mask = mask.expand(-1, -1, output_feats.shape[-1])
+                                token_mask = inputs["attention_mask"].bool()
                                 try:
-                                    output_feats = output_feats[mask.expand_as(output_feats)]
-                                    # 计算实际的特征数量
-                                    valid_tokens = mask.sum().item()
-                                    if valid_tokens > 0:
-                                        output_feats = output_feats.view(valid_tokens, -1)
-                                except:
-                                    # 如果mask操作失败，直接reshape
+                                    output_feats = output_feats[token_mask]
+                                except Exception:
                                     output_feats = output_feats.view(-1, output_feats.shape[-1])
                             else:
                                 output_feats = output_feats.view(-1, output_feats.shape[-1])
@@ -206,6 +192,125 @@ class NullSpaceProjector:
         print(f"Computed covariance matrix shape: {cov_matrix.shape}")
         return cov_matrix
     
+    def compute_covariances_from_data(self, model, tokenizer, layer_names: List[str],
+                                      dataset_name: str = "wikipedia",
+                                      n_samples: int = 10000,
+                                      max_seq_length: int = 512) -> Dict[str, torch.Tensor]:
+        """单次遍历数据集，同时累积所有目标层输出特征的二阶矩"""
+
+        modules = {}
+        for name, module in model.named_modules():
+            if name in layer_names and hasattr(module, 'weight'):
+                modules[name] = module
+
+        missing = [name for name in layer_names if name not in modules]
+        if missing:
+            raise ValueError(f"Layers not found or missing weight: {missing[:5]}")
+
+        stats = {name: SecondMoment() for name in layer_names}
+        current = {"mask": None}
+
+        def make_hook(name):
+            def hook(module, inputs, output):
+                feats = output.detach()
+                if feats.dim() == 3:
+                    mask = current["mask"]
+                    if mask is not None and tuple(mask.shape) == tuple(feats.shape[:2]):
+                        feats = feats[mask]
+                    else:
+                        feats = feats.reshape(-1, feats.shape[-1])
+                elif feats.dim() != 2:
+                    feats = feats.reshape(-1, feats.shape[-1])
+
+                if feats.shape[-1] != module.weight.shape[0]:
+                    return
+                stats[name].add(feats.float())
+            return hook
+
+        handles = [modules[name].register_forward_hook(make_hook(name)) for name in layer_names]
+
+        raw_ds = load_dataset(WIKIPEDIA_DATA_PATH, split="train")
+        model.eval()
+        device = next(model.parameters()).device
+
+        processed_samples = 0
+        try:
+            with torch.no_grad():
+                for item in tqdm(raw_ds, desc=f"Collecting activations ({len(layer_names)} layers)", total=n_samples):
+                    if processed_samples >= n_samples:
+                        break
+
+                    text = item.get("text", "")
+                    if len(text.strip()) < 50:
+                        continue
+
+                    inputs = tokenizer(
+                        text,
+                        max_length=max_seq_length,
+                        truncation=True,
+                        padding=False,
+                        return_tensors="pt"
+                    )
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    inputs["decoder_input_ids"] = inputs["input_ids"].clone()
+
+                    attention_mask = inputs.get("attention_mask")
+                    current["mask"] = attention_mask.bool() if attention_mask is not None else None
+
+                    model(**inputs)
+                    processed_samples += 1
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        print(f"Processed {processed_samples} samples for {len(layer_names)} layers")
+        return {name: stats[name].moment().cpu() for name in layer_names}
+
+    def get_or_compute_projection_matrices(self, model, tokenizer, layer_names: List[str],
+                                           cache_dir: str = "./null_space_cache",
+                                           force_recompute: bool = False,
+                                           dataset_name: str = "wikipedia",
+                                           n_samples: int = 10000) -> Dict[str, torch.Tensor]:
+        """批量获取或计算投影矩阵，未命中缓存的层共享一次数据遍历"""
+
+        os.makedirs(cache_dir, exist_ok=True)
+        model_name = model.config._name_or_path.replace("/", "_")
+
+        def cache_file_for(layer_name: str) -> Path:
+            return Path(cache_dir) / f"{model_name}_{layer_name.replace('.', '_')}_nullspace_projection_th{self.nullspace_threshold}.pt"
+
+        projection_matrices = {}
+        pending_layers = []
+
+        for layer_name in layer_names:
+            cache_file = cache_file_for(layer_name)
+            if cache_file.exists() and not force_recompute:
+                try:
+                    projection_matrices[layer_name] = torch.load(cache_file, map_location='cpu')
+                    continue
+                except Exception as e:
+                    print(f"Error loading cache for {layer_name}: {e}. Recomputing...")
+            pending_layers.append(layer_name)
+
+        print(f"Null space cache: {len(projection_matrices)} loaded, {len(pending_layers)} to compute")
+
+        if pending_layers:
+            cov_matrices = self.compute_covariances_from_data(
+                model, tokenizer, pending_layers,
+                dataset_name=dataset_name,
+                n_samples=n_samples
+            )
+
+            for layer_name in pending_layers:
+                P = self.compute_projection_matrix(cov_matrices[layer_name])
+                projection_matrices[layer_name] = P
+                try:
+                    torch.save(P, cache_file_for(layer_name))
+                except Exception as e:
+                    print(f"Error saving cache for {layer_name}: {e}")
+
+        return projection_matrices
+
     def compute_projection_matrix(self, cov_matrix: torch.Tensor) -> torch.Tensor:
         """从协方差矩阵计算null space投影矩阵"""
         
@@ -336,13 +441,13 @@ def get_target_layers(model, target_modules_list: List[str] = ["attn", "mlp"]) -
                 # T5的注意力层
                 if 'attn' in target_modules_list:
                     if any(attn_key in module_name for attn_key in ['SelfAttention', 'EncDecAttention']):
-                        if any(weight_key in module_name for weight_key in ['.q.', '.k.', '.v.', '.o.']):
+                        if any(weight_key in module_name for weight_key in ['.q', '.k', '.v', '.o']):
                             target_layers.append(module_name)
                 
                 # T5的MLP层
                 if 'mlp' in target_modules_list:
                     if 'DenseReluDense' in module_name:
-                        if any(weight_key in module_name for weight_key in ['.wi.', '.wo.']):
+                        if any(weight_key in module_name for weight_key in ['.wi', '.wo']):
                             target_layers.append(module_name)
     else:
         # 其他模型的通用处理
@@ -376,4 +481,4 @@ def compute_null_space_projections(model, tokenizer, target_modules_list: List[s
         except Exception as e:
             print(f"✗ Failed to compute projection matrix for {layer_name}: {e}")
     
-    return projection_matrices
+    return projection_matrices 

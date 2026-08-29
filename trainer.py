@@ -9,7 +9,7 @@ import os
 from tqdm import tqdm
 import math
 import json
-from subsapce_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor, MultiTaskGaLoreAdamW
+from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor, MultiTaskGaLoreAdamW
 from adaptive_gating import GradientBalanceController, AdaptiveTemperatureScheduler
 from null_space_utils import NullSpaceProjector, get_target_layers
 
@@ -80,14 +80,14 @@ def compute_gradient_balanced_weights(rec_grads, src_grads):
 
 def compute_balanced_weights(rec_grads, src_grads, task_types=None, adjustment_factor=0.3):
     """
-    Compute balanced weights based on task ratios and gradient norms.
-    First, assign base weights based on task ratios in the batch, then adjust using gradient norms.
-
+    基于任务比例和梯度范数的混合权重分配策略
+    先根据batch内任务比例分配基础权重，再根据梯度范数进行调整
+    
     Args:
-        rec_grads: Gradients for recommendation task
-        src_grads: Gradients for search task
-        task_types: Task types in the batch
-        adjustment_factor: Adjustment factor for gradient norms (0-1, larger values mean greater adjustment)
+        rec_grads: 推荐任务梯度
+        src_grads: 搜索任务梯度  
+        task_types: batch内的任务类型
+        adjustment_factor: 梯度范数调整因子 (0-1之间，越大调整幅度越大)
     """
     if rec_grads is None and src_grads is None:
         device = torch.cuda.current_device() if torch.cuda.is_available() else torch.device('cpu')
@@ -232,49 +232,31 @@ def train_epoch_multi_task(model, train_loader, optimizer, scheduler, collator, 
         # 计算三种梯度：whole batch、rec 和 search
         model_params = list(model.parameters())
         
-        # 1. 计算whole batch梯度
-        if whole_batch_loss is not None:
-            whole_batch_loss.backward(retain_graph=True)
-            whole_batch_grads = [param.grad.clone() if param.grad is not None else torch.zeros_like(param) 
-                               for param in model_params]
-            # 清零梯度，准备计算下一个
-            for param in model_params:
-                if param.grad is not None:
-                    param.grad.zero_()
-        else:
-            whole_batch_grads = [torch.zeros_like(param) for param in model_params]
-        
-        # 2. 计算rec任务梯度
-        if rec_loss is not None:
-            rec_loss.backward(retain_graph=True)
-            rec_grads = [param.grad.clone() if param.grad is not None else torch.zeros_like(param) 
-                        for param in model_params]
-            # 清零梯度，准备计算下一个
-            for param in model_params:
-                if param.grad is not None:
-                    param.grad.zero_()
-        else:
-            rec_grads = [torch.zeros_like(param) for param in model_params]
-        
-        # 3. 计算search任务梯度
-        if src_loss is not None:
-            src_loss.backward(retain_graph=False)  # 最后一个不需要retain_graph
-            src_grads = [param.grad.clone() if param.grad is not None else torch.zeros_like(param) 
-                        for param in model_params]
-        else:
-            src_grads = [torch.zeros_like(param) for param in model_params]
-        
-        # 累积三种梯度
         if not accumulated_whole_grads:  # 第一次初始化
             accumulated_whole_grads = {p: torch.zeros_like(p) for p in model_params}
             accumulated_rec_grads = {p: torch.zeros_like(p) for p in model_params}
             accumulated_src_grads = {p: torch.zeros_like(p) for p in model_params}
         
-        # 累积三种梯度
-        for param, whole_grad, rec_grad, src_grad in zip(model_params, whole_batch_grads, rec_grads, src_grads):
-            accumulated_whole_grads[param] += whole_grad
-            accumulated_rec_grads[param] += rec_grad
-            accumulated_src_grads[param] += src_grad
+        def accumulate_and_reset(target_grads):
+            for param in model_params:
+                if param.grad is not None:
+                    target_grads[param] += param.grad
+                    param.grad.zero_()
+        
+        # 1. whole batch梯度
+        if whole_batch_loss is not None:
+            whole_batch_loss.backward(retain_graph=True)
+            accumulate_and_reset(accumulated_whole_grads)
+        
+        # 2. rec任务梯度
+        if rec_loss is not None:
+            rec_loss.backward(retain_graph=True)
+            accumulate_and_reset(accumulated_rec_grads)
+        
+        # 3. search任务梯度
+        if src_loss is not None:
+            src_loss.backward(retain_graph=False)  # 最后一个不需要retain_graph
+            accumulate_and_reset(accumulated_src_grads)
         
         # 累积计数
         accumulated_sample_counts['rec'] += len(rec_indices)
@@ -282,43 +264,31 @@ def train_epoch_multi_task(model, train_loader, optimizer, scheduler, collator, 
 
         # 梯度累积边界
         if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-            # 准备三种梯度数据给GaLore优化器
-            model_params = list(model.parameters())
-            
-            # 1. 整个batch的平均梯度
-            whole_task_grads = {}
+            # 原地平均，复用累积缓冲区，避免额外的完整梯度副本
+            inv_steps = 1.0 / args.gradient_accumulation_steps
             for param in model_params:
-                whole_task_grads[param] = accumulated_whole_grads[param] / args.gradient_accumulation_steps
-            
-            # 2. rec任务的平均梯度
-            rec_task_grads = {}
-            for param in model_params:
-                rec_task_grads[param] = accumulated_rec_grads[param] / args.gradient_accumulation_steps
-            
-            # 3. search任务的平均梯度
-            src_task_grads = {}
-            for param in model_params:
-                src_task_grads[param] = accumulated_src_grads[param] / args.gradient_accumulation_steps
-            
-            # 设置梯度到参数上（使用whole batch梯度作为主梯度）
-            for param in model_params:
-                param.grad = whole_task_grads[param]
+                accumulated_whole_grads[param].mul_(inv_steps)
+                accumulated_rec_grads[param].mul_(inv_steps)
+                accumulated_src_grads[param].mul_(inv_steps)
+                # 使用whole batch梯度作为主梯度
+                param.grad = accumulated_whole_grads[param]
             
             # 准备task_gradients参数（传递三种不同的梯度）
             task_gradients = {
-                'merged': whole_task_grads,  # 使用whole batch的梯度作为merged
-                'rec': rec_task_grads,       # 使用rec任务的梯度
-                'src': src_task_grads        # 使用search任务的梯度
+                'merged': accumulated_whole_grads,
+                'rec': accumulated_rec_grads,
+                'src': accumulated_src_grads
             }
             
             # 计算梯度范数用于自适应门控
+            whole_grad_norm = 0.0
             rec_grad_norm = 0.0
             src_grad_norm = 0.0
             for param in model_params:
-                if param in rec_task_grads:
-                    rec_grad_norm += rec_task_grads[param].norm().item() ** 2
-                if param in src_task_grads:
-                    src_grad_norm += src_task_grads[param].norm().item() ** 2
+                whole_grad_norm += accumulated_whole_grads[param].norm().item() ** 2
+                rec_grad_norm += accumulated_rec_grads[param].norm().item() ** 2
+                src_grad_norm += accumulated_src_grads[param].norm().item() ** 2
+            whole_grad_norm = whole_grad_norm ** 0.5
             rec_grad_norm = rec_grad_norm ** 0.5
             src_grad_norm = src_grad_norm ** 0.5
             
@@ -348,7 +318,7 @@ def train_epoch_multi_task(model, train_loader, optimizer, scheduler, collator, 
                     gradient_controller.gating_net.temperature.data.fill_(current_temp)
 
             # 调用GaLore优化器的step方法
-            optimizer.step(task_gradients=task_gradients, gates=gates, task_sample_counts=accumulated_sample_counts, null_space_projections=null_space_projections)
+            optimizer.step(task_gradients=task_gradients, gates=gates, task_sample_counts=accumulated_sample_counts)
             
             # 调试：检查参数更新
             if args.rank == 0 and global_step % (args.print_steps * 10) == 0:
@@ -376,23 +346,6 @@ def train_epoch_multi_task(model, train_loader, optimizer, scheduler, collator, 
             if args.rank == 0 and global_step % args.print_steps == 0:
                 rec_loss_val = rec_loss.item() if rec_loss is not None else 0.0
                 src_loss_val = src_loss.item() if src_loss is not None else 0.0
-                
-                # 调试：比较三种梯度的范数
-                whole_grad_norm = 0.0
-                rec_grad_norm = 0.0
-                src_grad_norm = 0.0
-                
-                for param in model_params:
-                    if param in whole_task_grads:
-                        whole_grad_norm += whole_task_grads[param].norm().item() ** 2
-                    if param in rec_task_grads:
-                        rec_grad_norm += rec_task_grads[param].norm().item() ** 2
-                    if param in src_task_grads:
-                        src_grad_norm += src_task_grads[param].norm().item() ** 2
-                
-                whole_grad_norm = whole_grad_norm ** 0.5
-                rec_grad_norm = rec_grad_norm ** 0.5
-                src_grad_norm = src_grad_norm ** 0.5
                 
                 logging.info(f"Epoch {epoch}, Step {global_step}: Rec Loss = {rec_loss_val:.4f}, Src Loss = {src_loss_val:.4f}")
                 logging.info(f"Gradient Norms - Whole: {whole_grad_norm:.6f}, Rec: {rec_grad_norm:.6f}, Src: {src_grad_norm:.6f}")
@@ -709,6 +662,9 @@ def create_optimizer_and_scheduler(model, train_loader, args, null_space_project
     print(f"Number of GaLore parameters: {len(galore_params)}")
     print(f"Number of regular parameters: {len(regular_params)}")
 
+    if null_space_projections is None:
+        null_space_projections = {}
+
     param_groups = [{'params': regular_params}]
     for param in galore_params:
         layer_name = param_to_layer_name[id(param)]
@@ -723,7 +679,10 @@ def create_optimizer_and_scheduler(model, train_loader, args, null_space_project
             'null_space_projector': NullSpaceProjector(),
             'projection_matrix': projection_matrix
         }
-        print(f'added null space projection for layer: {layer_name}')
+        if projection_matrix is None:
+            print(f'WARNING: no null space projection for layer: {layer_name}')
+        else:
+            print(f'added null space projection for layer: {layer_name}')
         param_groups.append(param_group)
 
 

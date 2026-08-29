@@ -13,7 +13,7 @@ def parse_all_args(parser):
     parser.add_argument("--ckpt_path", type=str, default="./output/", help="ckpt path")
     
     # data
-    parser.add_argument("--data_path", type=str, default="/projects/0/prjs1158/jujia_ws/GenSR_Surface/data/kindle/bsr_data", help="data path")
+    parser.add_argument("--data_path", type=str, default="./data/qilin/seq_data", help="Directory containing the generated Qilin pickle files")
     
     # model
     parser.add_argument("--base_model", type=str, default="google/flan-t5-base", help="base model")
@@ -60,6 +60,8 @@ def parse_all_args(parser):
     
     # only test mode
     parser.add_argument("--test", action="store_true", default=False, help="whether to run in test mode")   
+    parser.add_argument("--search_only", action="store_true", default=False, help="whether to run search test only")   
+    parser.add_argument("--rec_only", action="store_true", default=False, help="whether to run recommendation test only")   
 
     # gate
     parser.add_argument("--use_learnable_gating", action="store_true", default=False, help="Whether to use adaptive gating for loss weighting")
@@ -80,8 +82,10 @@ def parse_all_args(parser):
     parser.add_argument("--temp_decay_factor", type=float, default=0.99, help="Temperature decay factor (fixed)")
 
     # Null Space Projection 相关参数
-    parser.add_argument("--use_null_space", action="store_true", default=True, 
+    parser.add_argument("--use_null_space", dest="use_null_space", action="store_true", default=False,
                         help="Whether to use null space projection")
+    parser.add_argument("--no_null_space", dest="use_null_space", action="store_false",
+                        help="Disable null space projection")
     parser.add_argument("--nullspace_threshold", type=float, default=2e-2, 
                         help="Threshold for null space detection (default: 2e-2)")
     parser.add_argument("--null_space_cache_dir", type=str, default="./null_space_cache", 
@@ -94,5 +98,5 @@ def parse_all_args(parser):
                         help="Number of samples to use for computing covariance matrix")
     parser.add_argument("--null_space_dataset", type=str, default="wikipedia", 
                         help="Dataset to use for computing null space (wikipedia, wikitext)")
-                        
+                  
     return parser

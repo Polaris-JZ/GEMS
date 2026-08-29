@@ -115,8 +115,13 @@ class BSRTestDataset(Dataset):
         inter_data = []
         if self.task == 'rec':
             for index, row in data.iterrows():
+                raw_targets = row['target_item'] if isinstance(row['target_item'], list) else [row['target_item']]
+                target_items = ['<item_'+str(i)+'>' for i in raw_targets]
+                if not target_items:
+                    continue
+
                 one_dict = dict()
-                one_dict['target_item'] = ['<item_'+str(target)+'>' for target in row['target_item']]
+                one_dict['target_item'] = target_items
                 history = row['item_list']
                 history = ['<item_'+str(i)+'>' for i in history]
                 one_dict['input'] = get_prompt(" ".join(history), 'rec')
@@ -124,13 +129,18 @@ class BSRTestDataset(Dataset):
                 inter_data.append(one_dict)
                 self.new_tokens.update(history)
                 one_dict['neg_item'] = ['<item_'+str(i)+'>' for i in row['neg_note_idx']]
-                one_dict['neg_item'].extend(one_dict['target_item'])
-                self.new_tokens.update(one_dict['target_item'])
+                one_dict['neg_item'].extend(target_items)
+                self.new_tokens.update(target_items)
                 self.new_tokens.update(one_dict['neg_item'])
         elif self.task == 'src':
             for index, row in data.iterrows():
+                raw_targets = row['target_item'] if isinstance(row['target_item'], list) else [row['target_item']]
+                target_items = ['<item_'+str(i)+'>' for i in raw_targets]
+                if not target_items:
+                    continue
+
                 one_dict = dict()
-                one_dict['target_item'] = ['<item_'+str(target)+'>' for target in row['target_item']]
+                one_dict['target_item'] = target_items
                 history = row['item_list']
                 history = ['<item_'+str(i)+'>' for i in history]
                 one_dict['input'] = get_prompt(" ".join(history), 'src', row['query'])
@@ -138,8 +148,8 @@ class BSRTestDataset(Dataset):
                 inter_data.append(one_dict)
                 self.new_tokens.update(history)
                 one_dict['neg_item'] = ['<item_'+str(i)+'>' for i in row['neg_note_idx']]
-                one_dict['neg_item'].extend(one_dict['target_item'])
-                self.new_tokens.update(one_dict['target_item'])
+                one_dict['neg_item'].extend(target_items)
+                self.new_tokens.update(target_items)
                 self.new_tokens.update(one_dict['neg_item'])
         return inter_data
     

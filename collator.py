@@ -43,7 +43,7 @@ class TestCollator(object):
         input_texts = [d["input_ids"] for d in batch]
         targets = [d["labels"] for d in batch]
         neg_items = [d["neg_item"] for d in batch]
-        # task_types = [d["task_type"] for d in batch]  # Add task types
+        # task_types = [d["task_type"] for d in batch]  # 添加任务类型
         inputs = self.tokenizer(
             text=input_texts,
             return_tensors="pt",

@@ -101,7 +101,7 @@ def setup_logging(args):
         level=logging.INFO,
         format='%(asctime)s - %(message)s',
         handlers=[
-            logging.FileHandler(log_file, mode='w'),  # 'w' mode for overwriting
+            logging.FileHandler(log_file, mode='a'),  # 'a' mode for appending
             logging.StreamHandler()
         ]
     )

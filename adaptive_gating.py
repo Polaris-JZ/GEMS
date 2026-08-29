@@ -5,21 +5,15 @@ import torch.nn.functional as F
 
 class AdaptiveGatingNetwork(nn.Module):
     """
-    Adaptive gating network for learning gradient fusion weights for search and recommendation tasks.
-
-    Args:
-        hidden_dim: Hidden dimension size for the network.
-        num_tasks: Number of tasks (default: 2).
-        dropout: Dropout rate for regularization.
-        initial_temperature: Initial temperature for softmax sharpness.
+    自适应门控网络，用于学习search和rec任务的梯度融合权重
     """
     def __init__(self, hidden_dim=128, num_tasks=2, dropout=0.1, initial_temperature=1.0):
         super().__init__()
         self.num_tasks = num_tasks
         
-        # Feature extraction network
+        # 特征提取网络
         self.feature_extractor = nn.Sequential(
-            nn.Linear(num_tasks * 3, hidden_dim),  # Input: loss, grad_norm, sample_count for each task
+            nn.Linear(num_tasks * 3, hidden_dim),  # 输入：loss, grad_norm, sample_count for each task
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -27,10 +21,10 @@ class AdaptiveGatingNetwork(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Gating weight generation
+        # 门控权重生成
         self.gate_generator = nn.Linear(hidden_dim // 2, num_tasks)
         
-        # Temperature parameter to control the sharpness of softmax
+        # 温度参数，用于控制softmax的锐度
         self.temperature = nn.Parameter(torch.tensor(initial_temperature))
         
     def forward(self, task_losses, task_grad_norms, task_sample_counts):
@@ -42,12 +36,12 @@ class AdaptiveGatingNetwork(nn.Module):
         Returns:
             gates: [rec_weight, src_weight] (sum to 1)
         """
-        # Feature normalization
+        # 特征标准化
         losses = torch.tensor(task_losses, dtype=torch.float32)
         grad_norms = torch.tensor(task_grad_norms, dtype=torch.float32)
         sample_counts = torch.tensor(task_sample_counts, dtype=torch.float32)
         
-        # Avoid division by zero
+        # 避免除零
         total_loss = losses.sum()
         total_samples = sample_counts.sum()
         
@@ -67,16 +61,16 @@ class AdaptiveGatingNetwork(nn.Module):
         else:
             grad_ratios = torch.ones_like(grad_norms) / len(grad_norms)
         
-        # Concatenate features
+        # 拼接特征
         features = torch.cat([loss_ratios, grad_ratios, sample_ratios])
         
-        # Extract features
+        # 提取特征
         hidden = self.feature_extractor(features)
         
-        # Generate gating weights
+        # 生成门控权重
         logits = self.gate_generator(hidden)
         
-        # Temperature-controlled softmax
+        # 使用温度调节的softmax
         gates = F.softmax(logits / self.temperature, dim=0)
         
         return gates

@@ -7,7 +7,7 @@ def prefix_allowed_tokens_fn(candidate_trie):
     def prefix_allowed_tokens(batch_id, sentence):
         sentence = sentence.tolist()
         trie_out = candidate_trie.get(sentence)
-        return trie_out
+        return trie_out if trie_out else [1]
 
     return prefix_allowed_tokens
 
@@ -100,7 +100,7 @@ def prefix_allowed_tokens_fn(candidate_trie):
     def prefix_allowed_tokens(batch_id, sentence):
         sentence = sentence.tolist()
         trie_out = candidate_trie.get(sentence)
-        return trie_out
+        return trie_out if trie_out else [1]
 
     return prefix_allowed_tokens
 
