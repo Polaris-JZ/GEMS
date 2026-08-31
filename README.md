@@ -34,7 +34,24 @@ valid_rec.pkl   valid_src.pkl
 test_rec.pkl    test_src.pkl
 ```
 
-This output directory is the same path used by `train.sh`; no additional path changes are required.
+
+### Amazon Electronics
+
+Place the six preprocessed Amazon interaction files in `data/amazon/ori_data/`:
+
+```text
+rec_train.pkl   src_train.pkl
+rec_val.pkl     src_val.pkl
+rec_test.pkl    src_test.pkl
+```
+
+Generate the sequential data and then the final training data:
+
+```bash
+python data/amazon/process_step_1.py
+python data/amazon/process_step_2.py
+```
+
 
 ## Training
 
@@ -44,10 +61,16 @@ Open `train.sh` and replace the placeholder with the path to your local T5-base 
 BASE_MODEL=/path/to/your/t5-base-model
 ```
 
-Start training from the repository root:
+Start Qilin training from the repository root:
 
 ```bash
 bash train.sh
 ```
 
-Training runs in the background. Check `output/train.txt` for console output and `output/training.log` for the training log. `train.sh` validates the six generated Qilin data files before launching training.
+To train with the generated Amazon data while keeping Qilin as the default dataset:
+
+```bash
+DATA_DIR=./data/amazon/bsr_data bash train.sh
+```
+
+Training runs in the background. Check `output/train.txt` for console output and `output/training.log` for the training log. `train.sh` validates the six generated data files before launching training.

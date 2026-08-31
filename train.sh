@@ -9,13 +9,13 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 PROJECT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$PROJECT_DIR"
 
-DATA_DIR=./data/qilin/seq_data
+DATA_DIR=${DATA_DIR:-./data/qilin/seq_data}
 OUTPUT_DIR=./output
 mkdir -p "$OUTPUT_DIR"
 
 for data_file in train_rec.pkl train_src.pkl valid_rec.pkl valid_src.pkl test_rec.pkl test_src.pkl; do
     if [[ ! -f "$DATA_DIR/$data_file" ]]; then
-        echo "Missing $DATA_DIR/$data_file. Generate the Qilin data first; see README.md." >&2
+        echo "Missing $DATA_DIR/$data_file. Generate the selected dataset first; see README.md." >&2
         exit 1
     fi
 done
