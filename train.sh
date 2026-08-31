@@ -21,7 +21,7 @@ for data_file in train_rec.pkl train_src.pkl valid_rec.pkl valid_src.pkl test_re
 done
 
 # 请替换为你自己的本地模型路径
-BASE_MODEL=/path/to/your/t5-base-model
+BASE_MODEL=/path/to/your/model
 
 nohup python train.py \
     --data_path "$DATA_DIR" \
